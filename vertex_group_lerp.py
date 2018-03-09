@@ -44,14 +44,6 @@ bl_info = {
 # - Only for Edit Mode
 
 
-# TODO:
-# - On slider change, lerp vertex positions.
-#   OR define an operator (button) that refreshes based on slider states.
-#   OR do it every frame.
-# - Have 2 modes:
-#   Edit: doesn't apply sliders
-#   Apply: does apply slider continuously. Everything's hidden except sliders.
-
 import bpy
 import bmesh
 from bpy.props import (StringProperty,
@@ -85,18 +77,24 @@ def get_vertex_positions_modelspace(vertices):
 def get_vertex_positions_worldspace(obj, vertices):
     return [ (obj.matrix_world * pos) for pos in [ v.co for v in vertices ]]
 
+
 def on_slider_change(feat, context):
     print("A change occured!", feat.name, ": ", feat.current_lerp_value)
     # FIXME: Perform actual LERP here
     obj = context.object
     vgroup = obj.vertex_groups[feat.vertex_group_name]
     i = 0
-    for v in obj.data.vertices:
-        if vgroup.index in [ vg.group for vg in v.groups ]:
+    bm = bmesh.from_edit_mesh(obj.data)
+    
+    for dv, v in zip(obj.data.vertices, bm.verts):
+        if vgroup.index in [ vg.group for vg in dv.groups ]:
             p = feat.vpositions[0][i], feat.vpositions[1][i]
             print("Lerp from ", p[0], " to ", p[1])
             v.co = Vector.lerp(p[0], p[1], feat.current_lerp_value)
             i += 1
+            
+    # bm.to_mesh(obj.data) # NOTE: Throws an exception if in edit mode
+    # bm.free() # FIXME
 
 class SpecieFeature(PropertyGroup):
     vertex_group_name = EnumProperty(
@@ -125,11 +123,12 @@ class OBJECT_OT_specie_record_feature(bpy.types.Operator):
         print("Extremum state:", self.feature_name, self.bound)
         obj = context.object
         feature = obj.specie_features[self.feature_name]
-        vertices = get_vertices_of_vertex_group(obj, feature.vertex_group_name);
-        vpositions = [ v.co.copy() for v in vertices ]
-        for p in vpositions:
+        vgroup = obj.vertex_groups[feature.vertex_group_name]
+        bm = bmesh.from_edit_mesh(obj.data)
+        feature.vpositions[int(self.bound)] = [ v.co.copy() for dv, v in zip(obj.data.vertices, bm.verts) if vgroup.index in [ vg.group for vg in dv.groups ] ]
+        # bm.free() # FIXME
+        for p in feature.vpositions[int(self.bound)]:
             print("New vposition: ", p)
-        feature.vpositions[int(self.bound)] = vpositions
         return {'FINISHED'}
 
 class OBJECT_OT_specie_add_feature(bpy.types.Operator):
@@ -184,6 +183,7 @@ class OBJECT_PT_my_panel(Panel):
 
 def register():
     bpy.utils.register_module(__name__)
+    # if !hasattr(bpy.types.Object, 'specie_features'):
     bpy.types.Object.specie_features = CollectionProperty(type=SpecieFeature)
 
 def unregister():
