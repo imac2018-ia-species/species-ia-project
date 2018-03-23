@@ -1,43 +1,15 @@
-# Procédé:
-# 1. Avoir plusieurs objets dans la scène en object Mode;
-#    On présuppose que les objets sont mutuellement adaptés au Shinkwrap;
-#    On présuppose qu'ils ont un ensemble commun de Shape Keys;
-# 2. Sélectionner un ensemble d'objets, puis appuyer sur un bouton;
-#    Incrémente un état interne et le numéro de génération. C'est-à-dire :
-#    - Supprime les non-fits, exceptés une petite proportion;
-#    - Divise la sélection en couples;
-#    - Pour chaque couple, générer N enfants d'après interpolation;
-#      Interpolation par Shape Keys. Le Shrinkwrap est un Shape Key, mais est supprimé à la fin
-#      afin d'économiser de la mémoire.
-#    - Ca serait bien que la couleur soit interpolée aussi.
-# 4. Goto 2 jusqu'à satisfaction.
-#
-# Y'a un bouton "clear" pour reset le numéro de génération et les données internes.
-
-# Exemple de run:
-# - J'ai un cube et une sphère dans ma scène.
-#   Ils ont tous les deux une "taille de chapeau" et "taille des pieds" en Shape Keys.
-# - Je lance l'add-on, et configure ses settings dans le panel.
-# - Je sélectionne le cube et la sphère.
-# - J'appuie sur "Generate".
-# - Je vois mes deux objets, ainsi que leur progéniture, bien répartis sur la grille.
-# - Je peux recommencer autant que je veux.
-#
-# Plan:
-# - Interpoler les couleurs de matériaux
-# - Jouer avec le Shrinkwrap
-# - Tester sur les animaux
-
-# bpy.ops.object.shape_key_add(from_mix=False)
-# bpy.ops.object.shape_key_add(all=False)
-# bpy.ops.object.modifier_add(type='SHRINKWRAP')
-# bpy.ops.object.modifier_apply(apply_as='SHAPE')
-# ob.active_shape_key_index
-# mod = ob.modifiers['Shrinkwrap']
-# mod.name = "new name"
-# mod.target = other_object
-# mod.wrap_method = 'NEAREST_SURFACEPOINT' | 'NEAREST_VERTEX' | 'PROJECT'
-
+bl_info = {
+    "name": "Species Project",
+    "description": "Content creation helper using evolutionary algorithms on shape keys and optionally using Shrinkwrap modifiers",
+    "author": "The Species Team",
+    "version": (0, 0, 1),
+    "blender": (2, 70, 0),
+    "location": "3D View > Tools",
+    "warning": "", # used for warning icon and text in addons panel
+    "wiki_url": "",
+    "tracker_url": "",
+    "category": "Development"
+}
 
 import bpy
 from bpy.props import (
@@ -46,10 +18,10 @@ from bpy.props import (
     FloatVectorProperty, IntVectorProperty
 )
 from bpy.types import (Panel, Operator, PropertyGroup)
-from mathutils import Vector
-from numpy import random
-import itertools
+from mathutils import (Vector, Color)
 import math
+import numpy
+from numpy import random
 
 
 #
@@ -59,21 +31,12 @@ import math
 def map01(x, minn, maxn):
     """Map a value in [min, max] range to the [0, 1] range."""
     if minn == maxn: # Prevent division by zero
-        return minn
+        return 0
     return (x - minn) / (maxn - minn)
 
 def lerp(start, end, t):
     """Perform linear interpolation"""
     return start * (1 - t) + end * t
-
-# https://blender.stackexchange.com/a/45100
-def duplicate_object(context, ob):
-    """Duplicate a Blender Object and links it to the scene."""
-    c = ob.copy()
-    c.data = ob.data.copy()
-    c.animation_data_clear()
-    context.scene.objects.link(c)
-    return c
 
 def make_2d_capacity_from_1d(count):
     """Computes a reasonably square 2D capacity from a 1D capacity."""
@@ -81,24 +44,84 @@ def make_2d_capacity_from_1d(count):
     h = math.ceil(count / w)
     assert w*h >= count
     return w, h
-    
 
 #
-# Properties
+# Blender-related functions
 #
+
+# https://blender.stackexchange.com/a/45100
+# https://blender.stackexchange.com/a/82775
+def duplicate_object(context, ob):
+    """Duplicate a Blender Object and links it to the scene."""
+    c = ob.copy()
+    c.data = ob.data.copy()
+    for k, mat in ob.material_slots.items():
+        c.material_slots[k].material = ob.material_slots[k].material.copy()
+    c.animation_data_clear()
+    context.scene.objects.link(c)
+    return c
+
+
+# Reminder: Valid values for `wrap_method` are 'NEAREST_SURFACEPOINT' | 'NEAREST_VERTEX' | 'PROJECT'.
+def add_shrinkwrap_shape_key(ob, name, target, wrap_method = 'NEAREST_SURFACEPOINT'):
+    bpy.ops.object.select_all(action='DESELECT')
+    bpy.context.scene.objects.active = ob
+    bpy.ops.object.modifier_add(type='SHRINKWRAP')
+    mod = ob.modifiers['Shrinkwrap']
+    mod.name = name
+    mod.target = target
+    mod.wrap_method = wrap_method
+    bpy.ops.object.modifier_apply(apply_as='SHAPE', modifier=name)
+
+
+def redraw_all_areas():
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            area.tag_redraw()
+
+
+#
+# Properties update hooks
+#
+
+def call_tidy_up(self, context):
+    bpy.ops.object.species_tidy_up('INVOKE_DEFAULT')
 
 def override_generation_index_for_selected_objects(self, context):
     for ob in context.selected_objects:
         ob.specie.generation_index = self.generation_index_override
-    
+    call_tidy_up(self, context)
+
+
+#
+# Properties
+#   
 
 class SpeciesScene(PropertyGroup):
     """Scene-wide data used by this Add-on."""
-    grid_spacing = FloatVectorProperty(name="Grid Spacing", size=3)
-    num_children_per_couple = IntProperty(name="Children per couple", default=1, min=1)
+    grid_spacing = FloatVectorProperty(name="Grid Spacing", size=3, update=call_tidy_up)
+    num_children_per_couple_without_shrinkwrap = IntProperty(name="Children per couple", default=0, min=0)
+    num_children_per_couple_using_shrinkwrap = IntProperty(name="Children per couple", default=0, min=0)
+    
     mutation_probability = FloatProperty(name="Mutation Probability", default=0.2, min=0, max=1)
     mutation_normal_distribution_scale = FloatProperty(name="Scale of Normal Distribution for Mutations", default=0.4, min=0)
     generation_index_override = IntProperty(name="Generation Index Override", default=0, min=-1, update=override_generation_index_for_selected_objects)
+    
+    def mix_scalar_genome(self, a, b, minn, maxn):
+        mixed = lerp(a, b, random.random())
+        if random.random() <= self.mutation_probability:
+            mixed += random.normal(scale = self.mutation_normal_distribution_scale)
+            mixed = numpy.clip(mixed, minn, maxn)
+        return mixed
+    
+    def mix_vector_genome(self, a, b, minn, maxn):
+        mixed = Vector.lerp(a, b, random.random())
+        if random.random() <= self.mutation_probability:
+            m = lambda: random.normal(scale = self.mutation_normal_distribution_scale)
+            mixed += Vector((m(), m(), m()))
+            mixed = Vector(numpy.clip(mixed, minn, maxn))
+        return mixed
+
 
 class SpecieObject(PropertyGroup):
     """Object-specific data used by this Add-on."""
@@ -110,17 +133,9 @@ class SpecieObject(PropertyGroup):
 # Operators
 #
 
-
-# Stored into constants to avoid surprises when changing the strings
-op_randomize = "object.species_randomize"
-op_mix = "object.species_mix"
-op_tidy_up = "object.species_tidy_up"
-op_flatten = "object.species_flatten"
-op_retain = "object.species_retain"
-
 class FlattenSpecies(Operator):
-    """Sets the generation index to the highest one for all objects."""
-    bl_idname = op_flatten
+    """Sets the generation index to the highest one for all objects"""
+    bl_idname = "object.species_flatten"
     bl_label = "Species: Flatten"
     
     def execute(self, context):
@@ -135,11 +150,11 @@ class FlattenSpecies(Operator):
         
         bpy.ops.object.species_tidy_up('INVOKE_DEFAULT')
         return {'FINISHED'}
-
+    
 
 class TidyUpSpecies(Operator):
-    """Nicely spreads objects across the grid."""
-    bl_idname = op_tidy_up
+    """Nicely spreads objects across the grid"""
+    bl_idname = "object.species_tidy_up"
     bl_label = "Species: Tidy Up"
     
     def execute(self, context):
@@ -165,8 +180,8 @@ class TidyUpSpecies(Operator):
 
 
 class RetainSpecies(Operator):
-    """Deletes objects that have interacted with this add-on and are not currently selected."""    
-    bl_idname = op_retain
+    """Deletes objects that have interacted with this add-on and are not currently selected"""    
+    bl_idname = "object.species_retain"
     bl_label = "Species: Retain"
     
     def execute(self, context):
@@ -174,13 +189,13 @@ class RetainSpecies(Operator):
             if ob.specie.generation_index >= 0 and not ob.select:
                 bpy.data.objects.remove(ob, do_unlink=True)
         bpy.ops.object.species_tidy_up('INVOKE_DEFAULT')
-        context.area.tag_redraw()
+        redraw_all_areas()
         return {'FINISHED'}
 
 
 class RandomizeSpecies(Operator):
-    """Randomizes all values of shape keys for each currently selected object."""
-    bl_idname = op_randomize
+    """Randomizes all values of shape keys for each currently selected object"""
+    bl_idname = "object.species_randomize"
     bl_label = "Species: Randomize"
     
     def execute(self, context):
@@ -196,22 +211,28 @@ class RandomizeSpecies(Operator):
 
 
 class MixSpecies(Operator):
-    """Treating currently selected objects as "mom, dad" couples, offspring is generated by randomly blending values of Shape Keys that parents have in common."""
-    bl_idname = op_mix
+    """Treating currently selected objects as "mom, dad" couples, offspring is generated by randomly blending values of Shape Keys that parents have in common"""
+    bl_idname = "object.species_mix"
     bl_label = "Species: Mix"
     
     def execute(self, context):
         obs = context.selected_objects
         
         if not obs:
-            self.report({'ERROR'}, 'No objects to mix!');
+            self.report({'WARNING'}, 'No objects to mix!')
             return {'FINISHED'}
         
         if len(obs) < 2:
-            self.report({'ERROR'}, 'Mixing needs multiple objects!');
+            self.report({'WARNING'}, 'Mixing needs multiple objects!')
             return {'FINISHED'}
 
         g = context.scene.species
+        
+        total_num_children = g.num_children_per_couple_using_shrinkwrap + g.num_children_per_couple_without_shrinkwrap
+        
+        if total_num_children <= 0:
+            self.report({'WARNING'}, 'There is zero children per couple!')
+            return {'FINISHED'}
 
         highest_generation_index = max(0, max([ob.specie.generation_index for ob in context.scene.objects]))
         
@@ -226,20 +247,38 @@ class MixSpecies(Operator):
             dk = dad.data.shape_keys.key_blocks
             keys = set(mk.keys()).intersection(dk.keys())
             next_gen = 1 + max(mom.specie.generation_index, dad.specie.generation_index)
-            for i in range(g.num_children_per_couple):
+    
+            for i in range(total_num_children):
+                
                 ob = duplicate_object(context, mom)
                 ob.specie.generation_index = next_gen
+                
+                # Use Shrinkwrap to blend between two models
+                if i < g.num_children_per_couple_using_shrinkwrap:
+                    modname = 'Shrinkwrap to ' + dad.name
+                    ob.location = dad.location.copy()
+                    add_shrinkwrap_shape_key(ob, name=modname, target=dad)
+                    ob.data.shape_keys.key_blocks[modname].value = random.random()
+                
+                # Mix materials (only diffuse color)
+                for m in range(1):
+                    mmat = mom.material_slots[m].material
+                    dmat = dad.material_slots[m].material
+                    color = g.mix_vector_genome(
+                        Vector(mmat.diffuse_color), 
+                        Vector(dmat.diffuse_color),
+                        Vector((0,0,0)), Vector((1,1,1))
+                    )
+                    ob.material_slots[m].material.diffuse_color = Color(color)
+                
+                # Mix shape keys
                 for key in keys:
-                    mixed = lerp(mk[key].value, dk[key].value, random.random())
-                    if random.random() <= g.mutation_probability:
-                        mixed += random.normal(scale=g.mutation_normal_distribution_scale)
-                        mixed = min(mixed, ob.data.shape_keys.key_blocks[key].slider_max)
-                        mixed = max(mixed, ob.data.shape_keys.key_blocks[key].slider_min)
-                    ob.data.shape_keys.key_blocks[key].value = mixed
+                    k = ob.data.shape_keys.key_blocks[key]
+                    k.value = g.mix_scalar_genome(mk[key].value, dk[key].value, k.slider_min, k.slider_max)
         
         bpy.ops.object.species_tidy_up('INVOKE_DEFAULT')
         return {'FINISHED'}
-
+    
 
 #
 # Panels
@@ -247,7 +286,7 @@ class MixSpecies(Operator):
 
 class MainPanel(Panel):
     bl_idname = "OBJECT_PT_species_main"
-    bl_label = "Species: Main Panel"
+    bl_label = "Species"
     bl_space_type = "VIEW_3D"
     bl_region_type = "TOOLS"
     bl_category = "Tools"
@@ -263,7 +302,9 @@ class MainPanel(Panel):
         c.prop(context.scene.species, "grid_spacing", text="Grid Spacing")
         
         c = self.layout.column(align=True)
-        c.prop(context.scene.species, "num_children_per_couple")
+        c.label("Children per couple:")
+        c.prop(context.scene.species, "num_children_per_couple_without_shrinkwrap", text="Without Shrinkwrap")
+        c.prop(context.scene.species, "num_children_per_couple_using_shrinkwrap", text="Using Shrinkwrap")
         
         c = self.layout.column(align=True)
         c.label("Mutations:")
@@ -273,8 +314,8 @@ class MainPanel(Panel):
         c = self.layout.column(align=True)
         c.label("All objects:")
         r = c.row(align=True)
-        r.operator(op_tidy_up, text="Tidy Up")
-        r.operator(op_flatten, text="Flatten")
+        r.operator(TidyUpSpecies.bl_idname, text="Tidy Up")
+        r.operator(FlattenSpecies.bl_idname, text="Flatten")
         
         c = self.layout.column(align=True)
         obs = context.selected_objects
@@ -289,11 +330,11 @@ class MainPanel(Panel):
                 c.prop(context.scene.species, "generation_index_override", text="Generation index")
             
             if len(obs) >= 1:
-                c.operator(op_retain, text="Retain")
-                c.operator(op_randomize, text="Randomize Shape Key Values")    
+                c.operator(RetainSpecies.bl_idname, text="Retain")
+                c.operator(RandomizeSpecies.bl_idname, text="Randomize Shape Key Values")    
                 
             if len(obs) >= 2:
-                c.operator(op_mix, text="Mix")
+                c.operator(MixSpecies.bl_idname, text="Mix")
         
 
 
@@ -301,22 +342,8 @@ class MainPanel(Panel):
 # Usual Blender stuff
 #
 
-bl_info = {
-    "name": "Species Project",
-    "description": "",
-    "author": "The Species Team",
-    "version": (0, 0, 1),
-    "blender": (2, 70, 0),
-    "location": "3D View > Tools",
-    "warning": "", # used for warning icon and text in addons panel
-    "wiki_url": "",
-    "tracker_url": "",
-    "category": "Development"
-}
-
 def register():
     bpy.utils.register_module(__name__)
-    # if !hasattr(bpy.types.Scene, 'species'):
     bpy.types.Scene.species = PointerProperty(type=SpeciesScene)
     bpy.types.Object.specie = PointerProperty(type=SpecieObject)
 
