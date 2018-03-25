@@ -2,7 +2,7 @@ bl_info = {
     "name": "Species Project",
     "description": "Content creation helper using evolutionary algorithms on shape keys and optionally using Shrinkwrap modifiers",
     "author": "The Species Team",
-    "version": (0, 0, 1),
+    "version": (1, 0, 0),
     "blender": (2, 70, 0),
     "location": "3D View > Tools",
     "warning": "", # used for warning icon and text in addons panel
@@ -52,7 +52,7 @@ def make_2d_capacity_from_1d(count):
 # https://blender.stackexchange.com/a/45100
 # https://blender.stackexchange.com/a/82775
 def duplicate_object(context, ob):
-    """Duplicate a Blender Object and links it to the scene."""
+    """Duplicates a Blender Object and links it to the scene."""
     c = ob.copy()
     c.data = ob.data.copy()
     for k, mat in ob.material_slots.items():
@@ -125,7 +125,7 @@ class SpeciesScene(PropertyGroup):
 
 class SpecieObject(PropertyGroup):
     """Object-specific data used by this Add-on."""
-    generation_index = IntProperty(name="Generation Index", default=-1, min=-1)
+    generation_index = IntProperty(name="Generation Index", default=-1, min=-1, update=call_tidy_up)
 
 
 
@@ -241,7 +241,7 @@ class MixSpecies(Operator):
                 ob.specie.generation_index = highest_generation_index
 
         # Generate offspring
-        couples = [(obs[i], obs[i+1]) for i in range(0, len(obs)-1, 1)]
+        couples = [(obs[i], obs[(i+1)%len(obs)]) for i in range(len(obs))]
         for mom, dad in couples:
             mk = mom.data.shape_keys.key_blocks
             dk = dad.data.shape_keys.key_blocks
